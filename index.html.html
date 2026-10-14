@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>弟高〇チャレンジ</title>
+<style>
+:root{--bg:#f6f4ef;--fg:#1d1d1f;--muted:#76767c;--card:#ffffff;--line:#dedad2;--accent:#e4572e;}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){--bg:#121214;--fg:#f2f2f4;--muted:#9a9aa4;--card:#1c1c20;--line:#303038;--accent:#ff7a50;}
+}
+:root[data-theme="dark"]{--bg:#121214;--fg:#f2f2f4;--muted:#9a9aa4;--card:#1c1c20;--line:#303038;--accent:#ff7a50;}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);
+  font-family:system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif;overflow:hidden;
+  -webkit-user-select:none;user-select:none}
+body{display:flex;flex-direction:column}
+header{padding:14px 16px 0;display:flex;justify-content:space-between;align-items:baseline;gap:12px}
+h1{font-size:18px;margin:0;letter-spacing:.06em}
+h1 span{color:var(--accent)}
+.best{font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums}
+#stage{position:relative;flex:1;margin:12px 16px 16px;border-radius:18px;background:var(--card);
+  border:1px solid var(--line);overflow:hidden;touch-action:none;cursor:crosshair}
+canvas{position:absolute;inset:0;width:100%;height:100%}
+#fx{pointer-events:none}
+#pct.pop{animation:pop .6s cubic-bezier(.2,1.6,.4,1)}
+#pct.glow{text-shadow:0 0 18px currentColor}
+@keyframes pop{0%{transform:scale(.4)}100%{transform:scale(1)}}
+#stage.flash::after{content:"";position:absolute;inset:0;pointer-events:none;
+  background:radial-gradient(circle,rgba(255,230,120,.55),transparent 70%);animation:flash .9s ease-out forwards}
+@keyframes flash{from{opacity:1}to{opacity:0}}
+#hud{position:absolute;left:0;right:0;top:18px;text-align:center;pointer-events:none}
+#pct{font-size:clamp(44px,12vw,84px);font-weight:800;line-height:1;font-variant-numeric:tabular-nums;transition:color .2s}
+#msg{font-size:15px;color:var(--muted);margin-top:8px;min-height:1.4em;padding:0 16px}
+#newrec{display:inline-block;margin-top:8px;padding:3px 10px;border-radius:99px;background:var(--accent);
+  color:#fff;font-size:13px;font-weight:700;visibility:hidden}
+#retry{position:absolute;left:50%;bottom:52px;transform:translateX(-50%);display:none;
+  padding:12px 28px;border:none;border-radius:99px;background:var(--accent);color:#fff;
+  font:inherit;font-size:16px;font-weight:700;letter-spacing:.05em;cursor:pointer;
+  box-shadow:0 4px 14px rgba(0,0,0,.18);transition:transform .1s}
+#retry:active{transform:translateX(-50%) scale(.96)}
+#hint{position:absolute;left:0;right:0;bottom:18px;text-align:center;color:var(--muted);font-size:14px;pointer-events:none;padding:0 16px}
+</style>
+</head>
+<body>
+<header>
+  <h1>弟高<span>〇</span>チャレンジ</h1>
+  <div class="best">ベスト: <span id="best">--</span></div>
+</header>
+<div id="stage">
+  <canvas id="cv"></canvas>
+  <canvas id="fx"></canvas>
+  <div id="hud">
+    <div id="pct"></div>
+    <div id="msg"></div>
+    <div id="newrec">新記録！</div>
+  </div>
+  <button id="retry" type="button">↻ リトライ</button>
+  <div id="hint">指やマウスで、一筆書きの円を描いてください</div>
+</div>
+<script>
+(() => {
+  const stage = document.getElementById('stage');
+  const cv = document.getElementById('cv');
+  const ctx = cv.getContext('2d');
+  const pctEl = document.getElementById('pct');
+  const msgEl = document.getElementById('msg');
+  const recEl = document.getElementById('newrec');
+  const hintEl = document.getElementById('hint');
+  const bestEl = document.getElementById('best');
+  const retryEl = document.getElementById('retry');
+
+  let W = 0, H = 0;
+  let pts = [];
+  let state = 'idle';      // idle | drawing | done
+  let result = null;       // {circle, score, ok}
+  let raf = 0;
+
+  // ---- ベストスコア ----
+  let best = null;
+  try { const v = parseFloat(localStorage.getItem('perfectCircleBest')); if (!isNaN(v)) best = v; } catch (e) {}
+  const showBest = () => bestEl.textContent = best == null ? '--' : best.toFixed(1) + '%';
+  showBest();
+
+  // ---- キャンバスサイズ ----
+  function resize() {
+    const dpr = window.devicePixelRatio || 1;
+    const r = stage.getBoundingClientRect();
+    W = r.width; H = r.height;
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    fx.width = cv.width; fx.height = cv.height;
+    fctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    draw();
+  }
+
+  // ---- 高得点エフェクト ----
+  const fx = document.getElementById('fx');
+  const fctx = fx.getContext('2d');
+  let parts = [], rings = [], fxRaf = 0;
+  const COLORS = ['#ff5a5f','#ffb400','#3ec46d','#2fa8ff','#a66cff','#ff7ac6','#ffe14d'];
+  const rand = (a, b) => a + Math.random() * (b - a);
+
+  function clearFx() {
+    parts = []; rings = [];
+    if (fxRaf) { cancelAnimationFrame(fxRaf); fxRaf = 0; }
+    fctx.clearRect(0, 0, W, H);
+    stage.classList.remove('flash');
+    pctEl.classList.remove('pop', 'glow');
+  }
+
+  function celebrate(score, c) {
+    // スコアが100%に近いほど派手に（90%から段階的に）
+    const level = Math.max(0, Math.min(1, (score - 90) / 9)); // 90→0, 99→1
+    pctEl.classList.remove('pop'); void pctEl.offsetWidth; pctEl.classList.add('pop');
+
+    // キラキラ：円周から外へ飛び散る
+    const sparks = Math.round(30 + level * 90);
+    for (let i = 0; i < sparks; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = rand(1.5, 4 + level * 5);
+      parts.push({ kind: 'spark', x: c.x + Math.cos(a) * c.r, y: c.y + Math.sin(a) * c.r,
+        vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life: 1, decay: rand(.012, .025),
+        size: rand(2, 4 + level * 3), color: COLORS[i % COLORS.length] });
+    }
+    // 波紋リング
+    const ringCount = 1 + Math.round(level * 2);
+    for (let i = 0; i < ringCount; i++) rings.push({ x: c.x, y: c.y, r: c.r, delay: i * 10, life: 1 });
+
+    // 95%以上：紙吹雪
+    if (score >= 95) {
+      const n = Math.round(80 + level * 220);
+      for (let i = 0; i < n; i++) {
+        parts.push({ kind: 'confetti', x: rand(0, W), y: rand(-H * .6, -10),
+          vx: rand(-1.5, 1.5), vy: rand(1.5, 4), rot: rand(0, Math.PI * 2), vr: rand(-.2, .2),
+          w: rand(6, 11), h: rand(3, 6), life: 1, decay: rand(.003, .006),
+          color: COLORS[Math.floor(Math.random() * COLORS.length)], wob: rand(0, 6.28) });
+      }
+    }
+    // 98%以上：画面フラッシュ＋スコアを光らせる
+    if (score >= 98) {
+      stage.classList.remove('flash'); void stage.offsetWidth; stage.classList.add('flash');
+      pctEl.classList.add('glow');
+    }
+    if (!fxRaf) fxRaf = requestAnimationFrame(fxLoop);
+  }
+
+  function fxLoop() {
+    fctx.clearRect(0, 0, W, H);
+    for (const g of rings) {
+      if (g.delay > 0) { g.delay--; continue; }
+      g.r += 4; g.life -= .02;
+      if (g.life <= 0) continue;
+      fctx.globalAlpha = g.life;
+      fctx.strokeStyle = '#ffc94d';
+      fctx.lineWidth = 4 * g.life + 1;
+      fctx.beginPath(); fctx.arc(g.x, g.y, g.r, 0, Math.PI * 2); fctx.stroke();
+    }
+    rings = rings.filter(g => g.life > 0);
+
+    for (const p of parts) {
+      p.life -= p.decay;
+      if (p.kind === 'spark') {
+        p.x += p.vx; p.y += p.vy; p.vx *= .96; p.vy = p.vy * .96 + .05;
+        fctx.globalAlpha = Math.max(0, p.life);
+        fctx.fillStyle = p.color;
+        fctx.beginPath(); fctx.arc(p.x, p.y, p.size * p.life + .5, 0, Math.PI * 2); fctx.fill();
+      } else {
+        p.wob += .1;
+        p.x += p.vx + Math.sin(p.wob) * .8; p.y += p.vy; p.rot += p.vr;
+        if (p.y > H + 20) p.life = 0;
+        fctx.globalAlpha = Math.max(0, Math.min(1, p.life * 2));
+        fctx.save();
+        fctx.translate(p.x, p.y); fctx.rotate(p.rot);
+        fctx.scale(1, Math.abs(Math.cos(p.wob)) + .2);
+        fctx.fillStyle = p.color;
+        fctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h);
+        fctx.restore();
+      }
+    }
+    parts = parts.filter(p => p.life > 0);
+    fctx.globalAlpha = 1;
+
+    if (parts.length || rings.length) fxRaf = requestAnimationFrame(fxLoop);
+    else { fxRaf = 0; fctx.clearRect(0, 0, W, H); }
+  }
+  window.addEventListener('resize', resize);
+
+  // ---- 最小二乗法による円フィット（Kasa法） ----
+  function det3(a,b,c,d,e,f,g,h,i){ return a*(e*i-f*h) - b*(d*i-f*g) + c*(d*h-e*g); }
+  function fitCircle(p) {
+    const n = p.length;
+    if (n < 5) return null;
+    let mx = 0, my = 0;
+    for (const q of p) { mx += q.x; my += q.y; }
+    mx /= n; my /= n;
+    let sx=0,sy=0,sxx=0,syy=0,sxy=0,sz=0,sxz=0,syz=0;
+    for (const q of p) {
+      const x = q.x - mx, y = q.y - my, z = x*x + y*y;
+      sx+=x; sy+=y; sxx+=x*x; syy+=y*y; sxy+=x*y; sz+=z; sxz+=x*z; syz+=y*z;
+    }
+    // [sxx sxy sx; sxy syy sy; sx sy n] [D E F]^T = -[sxz syz sz]^T
+    const D0 = det3(sxx,sxy,sx, sxy,syy,sy, sx,sy,n);
+    if (Math.abs(D0) < 1e-9) return null;
+    const bx=-sxz, by=-syz, bz=-sz;
+    const D = det3(bx,sxy,sx, by,syy,sy, bz,sy,n) / D0;
+    const E = det3(sxx,bx,sx, sxy,by,sy, sx,bz,n) / D0;
+    const F = det3(sxx,sxy,bx, sxy,syy,by, sx,sy,bz) / D0;
+    const cx = -D/2, cy = -E/2;
+    const r2 = cx*cx + cy*cy - F;
+    if (!(r2 > 0)) return null;
+    return { x: cx + mx, y: cy + my, r: Math.sqrt(r2) };
+  }
+
+  function relError(p, c) {
+    let s = 0;
+    for (const q of p) s += Math.abs(Math.hypot(q.x - c.x, q.y - c.y) - c.r);
+    return s / p.length / c.r;
+  }
+  const toScore = err => Math.max(0, Math.min(100, 100 * Math.exp(-err * 4)));
+
+  // 中心まわりに何ラジアン回ったか（符号付き）
+  function sweep(p, c) {
+    let total = 0;
+    let prev = Math.atan2(p[0].y - c.y, p[0].x - c.x);
+    for (let i = 1; i < p.length; i++) {
+      const a = Math.atan2(p[i].y - c.y, p[i].x - c.x);
+      let d = a - prev;
+      if (d > Math.PI) d -= 2*Math.PI;
+      if (d < -Math.PI) d += 2*Math.PI;
+      total += d; prev = a;
+    }
+    return total;
+  }
+
+  const scoreColor = s => `hsl(${Math.round(Math.max(0, Math.min(1, (s - 50) / 45)) * 120)},75%,48%)`;
+  const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+  // ---- 描画 ----
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    const c = state === 'done' && result && result.circle ? result.circle : (pts.length > 10 ? fitCircle(pts) : null);
+
+    // お手本の円（結果表示時）
+    if (state === 'done' && c) {
+      ctx.save();
+      ctx.setLineDash([6, 8]);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = css('--muted');
+      ctx.globalAlpha = 0.7;
+      ctx.beginPath(); ctx.arc(c.x, c.y, c.r, 0, Math.PI*2); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = css('--muted');
+      ctx.beginPath(); ctx.arc(c.x, c.y, 3, 0, Math.PI*2); ctx.fill();
+      ctx.restore();
+    }
+
+    // 描いた線（ズレ具合で色分け）
+    if (pts.length > 1) {
+      ctx.lineWidth = 6; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      for (let i = 1; i < pts.length; i++) {
+        let col = css('--fg');
+        if (c) {
+          const dev = Math.abs(Math.hypot(pts[i].x - c.x, pts[i].y - c.y) - c.r) / c.r;
+          const t = Math.min(dev / 0.12, 1);
+          col = `hsl(${Math.round(120 * (1 - t))},80%,50%)`;
+        }
+        ctx.strokeStyle = col;
+        ctx.beginPath();
+        ctx.moveTo(pts[i-1].x, pts[i-1].y);
+        ctx.lineTo(pts[i].x, pts[i].y);
+        ctx.stroke();
+      }
+    }
+  }
+
+  function scheduleDraw() {
+    if (raf) return;
+    raf = requestAnimationFrame(() => { raf = 0; liveUpdate(); draw(); });
+  }
+
+  function liveUpdate() {
+    if (state !== 'drawing') return;
+    const c = pts.length > 15 ? fitCircle(pts) : null;
+    if (!c) { pctEl.textContent = ''; return; }
+    const s = toScore(relError(pts, c));
+    pctEl.textContent = s.toFixed(1) + '%';
+    pctEl.style.color = scoreColor(s);
+    // 1周したら自動で判定
+    if (c.r > 30 && Math.abs(sweep(pts, c)) >= Math.PI * 2) finish();
+  }
+
+  // ---- 判定 ----
+  function finish() {
+    if (state !== 'drawing') return;
+    state = 'done';
+    const c = fitCircle(pts);
+    let ok = false, score = 0, msg = '';
+
+    if (!c || pts.length < 20) {
+      msg = 'もっと大きく、しっかり描いてください';
+    } else if (c.r < 30) {
+      msg = '円が小さすぎます。もっと大きく描こう';
+    } else if (c.r > Math.max(W, H)) {
+      msg = 'それは円…ですか？もう一度どうぞ';
+    } else {
+      const turn = Math.abs(sweep(pts, c)) / (Math.PI * 2);
+      if (turn < 0.9) {
+        msg = 'ちゃんと一周して円を閉じてください';
+      } else {
+        ok = true;
+        score = toScore(relError(pts, c));
+        msg = score >= 97 ? '神業！ほぼ完璧な真円です'
+            : score >= 93 ? 'すばらしい！コンパス級の精度'
+            : score >= 88 ? 'とても上手です！'
+            : score >= 80 ? 'なかなかの円です'
+            : score >= 65 ? 'もう少し！ゆっくり描いてみよう'
+            : 'まだまだこれから！';
+      }
+    }
+
+    result = { circle: ok ? c : null, score, ok };
+    pctEl.textContent = ok ? score.toFixed(1) + '%' : '×';
+    pctEl.style.color = ok ? scoreColor(score) : css('--muted');
+    msgEl.textContent = msg;
+
+    if (ok && (best == null || score > best)) {
+      const first = best == null;
+      best = score;
+      try { localStorage.setItem('perfectCircleBest', String(best)); } catch (e) {}
+      showBest();
+      if (!first) recEl.style.visibility = 'visible';
+    }
+    hintEl.textContent = 'そのまま描き直してもリトライできます';
+    retryEl.style.display = 'block';
+    draw();
+    if (ok && score >= 90) celebrate(score, c);
+  }
+
+  // ---- リトライ ----
+  function reset() {
+    clearFx();
+    state = 'idle';
+    result = null;
+    pts = [];
+    pctEl.textContent = '';
+    msgEl.textContent = '';
+    recEl.style.visibility = 'hidden';
+    retryEl.style.display = 'none';
+    hintEl.textContent = '指やマウスで、一筆書きの円を描いてください';
+    draw();
+  }
+  retryEl.addEventListener('pointerdown', e => e.stopPropagation());
+  retryEl.addEventListener('click', e => { e.stopPropagation(); reset(); });
+
+  // ---- 入力 ----
+  function pos(e) {
+    const r = stage.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+
+  // 描画中は最初に触れたポインター（指・ペン・マウス）1本だけを追う
+  let activeId = null;
+
+  stage.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    if (activeId !== null) return;   // 2本目以降の指や手のひらは無視
+    activeId = e.pointerId;
+    try { stage.setPointerCapture(e.pointerId); } catch (_) {}
+    clearFx();
+    state = 'drawing';
+    result = null;
+    pts = [pos(e)];
+    pctEl.textContent = '';
+    msgEl.textContent = '';
+    recEl.style.visibility = 'hidden';
+    retryEl.style.display = 'none';
+    hintEl.textContent = '';
+    draw();
+  });
+
+  stage.addEventListener('pointermove', e => {
+    if (state !== 'drawing' || e.pointerId !== activeId) return;
+    const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+    for (const ev of (evs.length ? evs : [e])) {
+      const p = pos(ev);
+      const last = pts[pts.length - 1];
+      if (Math.hypot(p.x - last.x, p.y - last.y) >= 2) pts.push(p);
+    }
+    scheduleDraw();
+  });
+
+  const end = e => {
+    if (e.pointerId !== activeId) return;   // 最初の1本が離れたときだけ判定
+    activeId = null;
+    if (state === 'drawing') finish();
+  };
+  stage.addEventListener('pointerup', end);
+  stage.addEventListener('pointercancel', end);
+  stage.addEventListener('lostpointercapture', end);
+
+  resize();
+})();
+</script>
+</body>
+</html>
